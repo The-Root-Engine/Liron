@@ -9,50 +9,47 @@
 
 #include <functional>
 
-struct FLironTextureHandle { uint32 ID = 0xFFFFFFFF; constexpr FLironTextureHandle() = default; explicit constexpr FLironTextureHandle(const uint32 InID) : ID(InID) {} };
-struct FLironBufferHandle  { uint32 ID = 0xFFFFFFFF; constexpr FLironBufferHandle () = default; explicit constexpr FLironBufferHandle (const uint32 InID) : ID(InID) {} };
-
-struct FLironPassAccess 
+struct FLironResource
 {
-    TFixedArray<FLironTextureHandle, 4> ReadTextures ;
-    TFixedArray<FLironTextureHandle, 4> WriteTextures;
-    
-    TFixedArray<FLironBufferHandle, 4> ReadBuffers ;
-    TFixedArray<FLironBufferHandle, 4> WriteBuffers;
-};
-
-struct FLironPassResourceState 
-{
+    enum class EType { Buffer, Texture } Type = EType::Texture;
     FErolyssaBarrierResourceState State = FErolyssaBarrierResourceState::None;
-    bool bIsPersistent = false;
-};
-
-struct FLironPassResourceTextureState 
-{
-    FErolyssaBarrierResourceState State = FErolyssaBarrierResourceState::None;
-    bool bIsPersistent = false;
     
-    VkImage     RealImage = VK_NULL_HANDLE;
-    VkImageView RealView  = VK_NULL_HANDLE;
-    VkExtent2D  Extent    = { 0, 0 };
-};
-
-struct FLironPassResourceBufferState 
-{
-    FErolyssaBarrierResourceState State = FErolyssaBarrierResourceState::None;
-    bool bIsPersistent = false;
-    
+    VkImage RealImage = VK_NULL_HANDLE;
+    VkImageView RealView = VK_NULL_HANDLE;
+    VkExtent2D RealExtent = { 0, 0 };
     VkBuffer RealBuffer = VK_NULL_HANDLE;
 };
 
+struct FLironResourceHandle
+{
+    uint32 ID = 0xFFFFFFFF;
+    bool IsValid() const { return ID != 0xFFFFFFFF; }
+    
+    static const FLironResourceHandle Invalid;
+};
+
+inline constexpr FLironResourceHandle FLironResourceHandle::Invalid  = FLironResourceHandle{ 0xFFFFFFFF };
+
+struct FLironResourceRequirement
+{
+    FLironResourceHandle Handle;
+    FErolyssaBarrierResourceState NeededState;
+    
+    constexpr FLironResourceRequirement() = default;
+    explicit constexpr FLironResourceRequirement(const FLironResourceHandle InHandle, const FErolyssaBarrierResourceState InNeededState)
+        : Handle(InHandle), NeededState(InNeededState) {}
+};
+
+using FLironPassRequirements = TArray<FLironResourceRequirement, TInlineAllocator<4>>;
+
 struct FLironPass
 {
-#if LIRON_ENABLE_DEBUG
-    std::string Name;
-#endif
-    
-    FLironPassAccess Access;
     int32 Priority = 0;
+    enum class EType { Compute, Graphics } Type = EType::Compute;
+    
+    FLironPassRequirements Requirements;
+    FLironResourceHandle ColorAttachmentHandle;
+    FLironResourceHandle DepthAttachmentHandle;
     
     std::function<void(const FErolyssaCommandBuffer& CommandBuffer)> ExecuteLambda;
 };

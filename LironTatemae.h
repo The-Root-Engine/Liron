@@ -11,3 +11,4 @@
 #include "../Basement/Containers/FixedArray.h"
 #include "../Basement/Meta.h"
 #include "../Basement/Math/Math.h"
+#include "../Basement/Allocators/InlineAllocator.h"

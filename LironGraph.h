@@ -6,6 +6,7 @@
 #include "LironTatemae.h"
 #include "LironStructures.h"
 
+#include <utility>
 #include <vector>
 #include <string>
 #include <functional>
@@ -15,6 +16,7 @@ class FLironGraph
 {
     
 public:
+    /*
     FLironTextureHandle RegisterTexture(const std::string_view InName)
     {
         const uint32 NewID = TextureTracker.Num();
@@ -38,72 +40,199 @@ public:
         BufferTracker.Emplace();
         return FLironBufferHandle(NewID);
     }
+    */
     
-    FLironTextureHandle ImportTexture(const std::string_view InName, VkImage InImage, VkImageView InView, VkExtent2D InExtent)
+    FLironResourceHandle ImportBuffer(const FErolyssaBuffer& InBuffer, const FErolyssaBarrierResourceState InInitialState = FErolyssaBarrierResourceState::None)
     {
-        const uint32 NewID = TextureTracker.Num();
+        FLironResource Resource{};
+        Resource.Type = FLironResource::EType::Buffer;
+        Resource.RealBuffer = InBuffer;
+        Resource.State = InInitialState;
         
-#if LIRON_ENABLE_DEBUG
-        TextureNames.Emplace(InName);
-#endif
-        
-        FLironPassResourceTextureState ResourceTextureState{};
-        ResourceTextureState.State         = FErolyssaBarrierResourceState::None; 
-        ResourceTextureState.RealImage     = InImage;
-        ResourceTextureState.RealView      = InView;
-        ResourceTextureState.Extent        = InExtent;
-        ResourceTextureState.bIsPersistent = true;
-        
-        TextureTracker.Add(ResourceTextureState);
-        return FLironTextureHandle(NewID);
+        const FLironResourceHandle Handler { Resources.Num() };
+        Resources.Add(Resource);
+        return Handler;
     }
     
-    FLironBufferHandle ImportBuffer(const std::string_view InName, const VkBuffer InBuffer)
+    FLironResourceHandle ImportTexture(const VkImage InImage, const VkImageView InView, const VkExtent2D InExtent, const FErolyssaBarrierResourceState InInitialState = FErolyssaBarrierResourceState::None)
     {
-        const uint32 NewID = BufferTracker.Num();
+        FLironResource Resource{};
+        Resource.Type = FLironResource::EType::Texture;
+        Resource.RealImage = InImage;
+        Resource.RealView = InView;
+        Resource.RealExtent = InExtent;
+        Resource.State = InInitialState;
         
-#if LIRON_ENABLE_DEBUG
-        BufferNames.Add(std::string(InName));
-#endif
-        
-        FLironPassResourceBufferState ResourceBufferState{};
-        ResourceBufferState.State         = FErolyssaBarrierResourceState::None;
-        ResourceBufferState.RealBuffer    = InBuffer;
-        ResourceBufferState.bIsPersistent = true;
-        
-        BufferTracker.Add(ResourceBufferState);
-        return FLironBufferHandle(NewID);
+        const FLironResourceHandle Handler { Resources.Num() };
+        Resources.Add(Resource);
+        return Handler;
     }
     
-    void AddPass(const std::string_view InName, const FLironPassAccess& InAccess, const int32 InPriority, const std::function<void(const FErolyssaCommandBuffer& CommandBuffer)>& InExecuteLambda)
+    void AddComputePass(
+        const std::string_view InName, FLironPassRequirements InRequirements, const int32 InPriority,
+        const std::function<void(const FErolyssaCommandBuffer& CommandBuffer)>& InExecuteLambda
+    )
     {
-        FLironPass Pass{};
+        FLironPass Pass;
         
-#if LIRON_ENABLE_DEBUG
-        Pass.Name = InName;
-#endif
-        
-        Pass.Access = InAccess;
         Pass.Priority = InPriority;
+        Pass.Type = FLironPass::EType::Compute;
+        
+        Pass.Requirements = Move(InRequirements);
+        Pass.ColorAttachmentHandle = FLironResourceHandle::Invalid;
+        Pass.DepthAttachmentHandle = FLironResourceHandle::Invalid;
+        
         Pass.ExecuteLambda = InExecuteLambda;
         
-        RegisteredPasses.Emplace(Pass);
+        Passes.Add(Pass);
+    }
+    
+    void AddGraphicsPass(
+        const std::string_view InName, FLironPassRequirements InRequirements, const int32 InPriority,
+        const FLironResourceHandle InColorAttachmentHandle, const FLironResourceHandle InDepthAttachmentHandle,
+        const std::function<void(const FErolyssaCommandBuffer& CommandBuffer)>& InExecuteLambda
+    )
+    {
+        FLironPass Pass;
+        
+        Pass.Priority = InPriority;
+        Pass.Type = FLironPass::EType::Graphics;
+        
+        Pass.Requirements = Move(InRequirements);
+        Pass.ColorAttachmentHandle = InColorAttachmentHandle;
+        Pass.DepthAttachmentHandle = InDepthAttachmentHandle;
+        
+        Pass.ExecuteLambda = InExecuteLambda;
+        
+        Passes.Add(Pass);
+    }
+    
+    void Execute(const FErolyssaCommandBuffer& InCommandBuffer)
+    {
+        std::sort(Passes.begin(), Passes.end(), [](const FLironPass& A, const FLironPass& B) { return A.Priority < B.Priority; });
+        
+        for(const FLironPass& Pass : Passes)
+        {
+            TArray<FErolyssaBarrierBufferInfo> BufferBarrierInfos;
+            TArray<FErolyssaBarrierTextureInfo> TextureBarrierInfos;
+            
+            const bool bClearColor = Pass.Type == FLironPass::EType::Graphics && Pass.ColorAttachmentHandle.IsValid() && Resources[Pass.ColorAttachmentHandle.ID].State == FErolyssaBarrierResourceState::None;
+            const bool bClearDepth = Pass.Type == FLironPass::EType::Graphics && Pass.DepthAttachmentHandle.IsValid() && Resources[Pass.DepthAttachmentHandle.ID].State == FErolyssaBarrierResourceState::None;
+            
+            for(const FLironResourceRequirement& Requirement : Pass.Requirements)
+            {
+                FLironResource& Resource = Resources[Requirement.Handle.ID];
+                if(Resource.State == Requirement.NeededState) continue;
+                
+                switch (Resource.Type)
+                {
+                case FLironResource::EType::Buffer:
+                    {
+                        FErolyssaBarrierBufferInfo BufferBarrierInfo;
+                        BufferBarrierInfo.Buffer = Resource.RealBuffer;
+                        BufferBarrierInfo.Offset = 0;
+                        BufferBarrierInfo.Size = VK_WHOLE_SIZE;
+                        BufferBarrierInfo.OldState = Resource.State;
+                        BufferBarrierInfo.NewState = Requirement.NeededState;
+                        BufferBarrierInfos.Add(BufferBarrierInfo);
+                    }
+                    break;
+                    
+                case FLironResource::EType::Texture:
+                    {
+                        FErolyssaBarrierTextureInfo TextureBarrierInfo;
+                        TextureBarrierInfo.Image = Resource.RealImage;
+                        TextureBarrierInfo.AspectMask = Requirement.NeededState == FErolyssaBarrierResourceState::DepthStencilAttachment ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+                        TextureBarrierInfo.OldState = Resource.State;
+                        TextureBarrierInfo.NewState = Requirement.NeededState;
+                        TextureBarrierInfos.Add(TextureBarrierInfo);
+                    }
+                    break;
+                }
+                
+                Resource.State = Requirement.NeededState;
+            }
+            
+            if(!BufferBarrierInfos.IsEmpty() || !TextureBarrierInfos.IsEmpty())
+                FErolyssaBarrier::Insert(InCommandBuffer, BufferBarrierInfos, TextureBarrierInfos);
+            
+            if(Pass.Type == FLironPass::EType::Graphics)
+            {
+                VkRenderingInfo RenderingInfo{};
+                RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+                RenderingInfo.layerCount = 1;
+                
+                VkRenderingAttachmentInfo ColorAttachment{};
+                VkRenderingAttachmentInfo DepthAttachment{};
+                
+                if(Pass.ColorAttachmentHandle.IsValid())
+                {
+                    const FLironResource& TextureResource = Resources[Pass.ColorAttachmentHandle.ID];
+                    
+                    ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                    ColorAttachment.imageView = TextureResource.RealView;
+                    ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    ColorAttachment.loadOp = bClearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+                    ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                    ColorAttachment.clearValue.color.uint32[0] = 0xFFFFFFFF;
+                    ColorAttachment.clearValue.color.uint32[1] = 0xFFFFFFFF;
+                    ColorAttachment.clearValue.color.uint32[2] = 0xFFFFFFFF;
+                    ColorAttachment.clearValue.color.uint32[3] = 0xFFFFFFFF;
+                    
+                    RenderingInfo.colorAttachmentCount = 1;
+                    RenderingInfo.pColorAttachments = &ColorAttachment;
+                    RenderingInfo.renderArea.extent = TextureResource.RealExtent;
+                }
+                
+                if(Pass.DepthAttachmentHandle.IsValid())
+                {
+                    const FLironResource& DepthResource = Resources[Pass.DepthAttachmentHandle.ID];
+                    
+                    DepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                    DepthAttachment.imageView = DepthResource.RealView;
+                    DepthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                    DepthAttachment.loadOp = bClearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+                    DepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                    DepthAttachment.clearValue.depthStencil.depth = 1.0f;
+                    DepthAttachment.clearValue.depthStencil.stencil = 0;
+                    
+                    RenderingInfo.pDepthAttachment = &DepthAttachment;
+                    
+                    if(RenderingInfo.renderArea.extent.width == 0)
+                        RenderingInfo.renderArea.extent = DepthResource.RealExtent;
+                }
+                
+                vkCmdBeginRendering(InCommandBuffer, &RenderingInfo);
+            }
+            
+            Pass.ExecuteLambda(InCommandBuffer);
+            
+            if(Pass.Type == FLironPass::EType::Graphics)
+            {
+                vkCmdEndRendering(InCommandBuffer);
+            }
+        }
+    }
+    
+    void PrepareForPresent(const FErolyssaCommandBuffer& CmdBuffer, const FLironResourceHandle SwapchainHandle)
+    {
+        FLironResource& SwapchainResource = Resources[SwapchainHandle.ID];
+        if(SwapchainResource.State == FErolyssaBarrierResourceState::Present) return;
+        
+        TArray<FErolyssaBarrierTextureInfo> PresentBarriers;
+        
+        FErolyssaBarrierTextureInfo TextureBarrierInfo;
+        TextureBarrierInfo.Image      = SwapchainResource.RealImage;
+        TextureBarrierInfo.OldState   = SwapchainResource.State;
+        TextureBarrierInfo.NewState   = FErolyssaBarrierResourceState::Present;
+        TextureBarrierInfo.AspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        PresentBarriers.Add(TextureBarrierInfo);
+        
+        FErolyssaBarrier::Insert(CmdBuffer, {}, PresentBarriers);
+        SwapchainResource.State = FErolyssaBarrierResourceState::Present;
     }
     
     /*
-    void Execute()
-    {
-        TArray<uint32> ExecutionOrder;
-        BuildExecutionOrder(ExecutionOrder);
-        
-        for(const uint32 PassIndex : ExecutionOrder)
-            if(const FLironPass& Pass = RegisteredPasses[PassIndex]; Pass.ExecuteLambda)
-                Pass.ExecuteLambda();
-        
-        Clear();
-    }
-    */
-    
     void Execute(const FErolyssaCommandBuffer& InCommandBuffer)
     {
         // 1. Получаем правильный порядок выполнения пассов
@@ -119,7 +248,7 @@ public:
         // 2. Итерируемся по отсортированным пассам кадра
         for (const uint32 PassIndex : ExecutionOrder)
         {
-            const FLironPass& Pass = RegisteredPasses[PassIndex];
+            const FLironPass& Pass = Passes[PassIndex];
             if (!Pass.ExecuteLambda) continue;
 
             // Временные массивы для сбора барьеров именно для ЭТОГО пасса.
@@ -352,36 +481,24 @@ public:
         
         Clear();
     }
+    */
     
     void Clear()
     {
-        RegisteredPasses.Empty();
-        
-        TextureTracker.Empty();
-        BufferTracker.Empty();
-        
-#if LIRON_ENABLE_DEBUG
-        TextureNames.Empty();
-        BufferNames.Empty();
-#endif
+        Passes.Empty();
+        Resources.Empty();
     }
 
 private:
-    TArray<FLironPass> RegisteredPasses;
+    TArray<FLironPass> Passes;
+    TArray<FLironResource> Resources;
     
-#if LIRON_ENABLE_DEBUG
-    TArray<std::string> TextureNames;
-    TArray<std::string> BufferNames;
-#endif
-    
-    TArray<FLironPassResourceTextureState> TextureTracker;
-    TArray<FLironPassResourceBufferState > BufferTracker;
-    
+    /*
     enum class EPassColor : uint8 { White, Gray, Black };
     
     bool PassWritesToTexture(const uint32 PassIndex, const uint32 TextureID) const
     {
-        for(const FLironTextureHandle& TextureHandle : RegisteredPasses[PassIndex].Access.WriteTextures)
+        for(const FLironTextureHandle& TextureHandle : Passes[PassIndex].Access.WriteTextures)
             if(TextureHandle.ID == TextureID) return true;
         
         return false;
@@ -389,7 +506,7 @@ private:
     
     bool PassWritesToBuffer(const uint32 PassIndex, const uint32 BufferID) const
     {
-        for(const FLironBufferHandle& BufferHandle : RegisteredPasses[PassIndex].Access.WriteBuffers)
+        for(const FLironBufferHandle& BufferHandle : Passes[PassIndex].Access.WriteBuffers)
             if(BufferHandle.ID == BufferID) return true;
         
         return false;
@@ -397,7 +514,7 @@ private:
     
     void BuildExecutionOrder(TArray<uint32>& OutOrder)
     {
-        std::vector<EPassColor> PassColors(RegisteredPasses.Num(), EPassColor::White);
+        std::vector<EPassColor> PassColors(Passes.Num(), EPassColor::White);
         OutOrder.Empty();
         
         std::function<void(uint32)> VisitPass = [&](uint32 PassIndex) {
@@ -405,7 +522,7 @@ private:
             check(PassColors[PassIndex] != EPassColor::Gray, "Cyclic dependency detected!");
 
             PassColors[PassIndex] = EPassColor::Gray;
-            const auto& CurrentPass = RegisteredPasses[PassIndex];
+            const auto& CurrentPass = Passes[PassIndex];
             
             // ---------------------------------------------------------------------
             // 1. СВЯЗЬ ПО ЧТЕНИЮ (RaW): Ищем, кто писал в то, что мы читаем
@@ -414,7 +531,7 @@ private:
             // Проверка зависимостей по ТЕКСТУРАМ
             for (size_t i = 0; i < CurrentPass.Access.ReadTextures.Num(); ++i) {
                 uint32 ReadTexID = CurrentPass.Access.ReadTextures[i].ID;
-                for (uint32 PrevIdx = 0; PrevIdx < RegisteredPasses.Num(); ++PrevIdx) {
+                for (uint32 PrevIdx = 0; PrevIdx < Passes.Num(); ++PrevIdx) {
                     if (PrevIdx == PassIndex) continue;
                     if (PassWritesToTexture(PrevIdx, ReadTexID)) {
                         VisitPass(PrevIdx);
@@ -425,7 +542,7 @@ private:
             // Проверка зависимостей по БУФЕРАМ
             for (size_t i = 0; i < CurrentPass.Access.ReadBuffers.Num(); ++i) {
                 uint32 ReadBufID = CurrentPass.Access.ReadBuffers[i].ID;
-                for (uint32 PrevIdx = 0; PrevIdx < RegisteredPasses.Num(); ++PrevIdx) {
+                for (uint32 PrevIdx = 0; PrevIdx < Passes.Num(); ++PrevIdx) {
                     if (PrevIdx == PassIndex) continue;
                     if (PassWritesToBuffer(PrevIdx, ReadBufID)) {
                         VisitPass(PrevIdx);
@@ -440,11 +557,11 @@ private:
             // Разруливаем WaW конфликты для ТЕКСТУР
             for (size_t i = 0; i < CurrentPass.Access.WriteTextures.Num(); ++i) {
                 uint32 WriteTexID = CurrentPass.Access.WriteTextures[i].ID;
-                for (uint32 PrevIdx = 0; PrevIdx < RegisteredPasses.Num(); ++PrevIdx) {
+                for (uint32 PrevIdx = 0; PrevIdx < Passes.Num(); ++PrevIdx) {
                     if (PrevIdx == PassIndex) continue;
                     
                     if (PassWritesToTexture(PrevIdx, WriteTexID)) {
-                        if (RegisteredPasses[PrevIdx].Priority < CurrentPass.Priority) {
+                        if (Passes[PrevIdx].Priority < CurrentPass.Priority) {
                             VisitPass(PrevIdx);
                         }
                     }
@@ -454,11 +571,11 @@ private:
             // Разруливаем WaW конфликты для БУФЕРАВ (например, два вычислительных пасса пишут в один буфер аргументов)
             for (size_t i = 0; i < CurrentPass.Access.WriteBuffers.Num(); ++i) {
                 uint32 WriteBufID = CurrentPass.Access.WriteBuffers[i].ID;
-                for (uint32 PrevIdx = 0; PrevIdx < RegisteredPasses.Num(); ++PrevIdx) {
+                for (uint32 PrevIdx = 0; PrevIdx < Passes.Num(); ++PrevIdx) {
                     if (PrevIdx == PassIndex) continue;
                     
                     if (PassWritesToBuffer(PrevIdx, WriteBufID)) {
-                        if (RegisteredPasses[PrevIdx].Priority < CurrentPass.Priority) {
+                        if (Passes[PrevIdx].Priority < CurrentPass.Priority) {
                             VisitPass(PrevIdx);
                         }
                     }
@@ -469,15 +586,17 @@ private:
             OutOrder.Add(PassIndex);
         };
         
-        std::vector<uint32> SortedIndices(RegisteredPasses.Num());
-        for (uint32 i = 0; i < RegisteredPasses.Num(); ++i) SortedIndices[i] = i;
+        std::vector<uint32> SortedIndices(Passes.Num());
+        for (uint32 i = 0; i < Passes.Num(); ++i) SortedIndices[i] = i;
         
         std::sort(SortedIndices.begin(), SortedIndices.end(), [this](uint32 a, uint32 b) {
-            return RegisteredPasses[a].Priority > RegisteredPasses[b].Priority;
+            return Passes[a].Priority > Passes[b].Priority;
         });
         
         for (uint32 i : SortedIndices) {
             if (PassColors[i] == EPassColor::White) VisitPass(i);
         }
     }
+    */
+    
 };
