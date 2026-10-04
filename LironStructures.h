@@ -2,16 +2,27 @@
 
 #pragma once
 
-#include "LironTatemae.h"
 #include "Liron.h"
+#include "LironTatemae.h"
 
 #include "../Erolyssa/Resources/ErolyssaBarrier.h"
 
 #include <functional>
 
+enum class ELironResourceFlags : uint8
+{
+    None = 0,
+    
+    Buffer  = 0b0001,
+    Texture = 0b0010,
+    
+    Depth   = 0b0100
+};
+ENUM_CLASS_FLAGS(ELironResourceFlags)
+
 struct FLironResource
 {
-    enum class EType { Buffer, Texture } Type = EType::Texture;
+    ELironResourceFlags Flags = ELironResourceFlags::Buffer;
     FErolyssaBarrierResourceState State = FErolyssaBarrierResourceState::None;
     
     VkImage RealImage = VK_NULL_HANDLE;
@@ -40,7 +51,7 @@ struct FLironResourceRequirement
         : Handle(InHandle), NeededState(InNeededState) {}
 };
 
-using FLironPassRequirements = TArray<FLironResourceRequirement, TInlineAllocator<4>>;
+using FLironPassRequirements = TFixedArray<FLironResourceRequirement, 8>;
 
 struct FLironPass
 {
